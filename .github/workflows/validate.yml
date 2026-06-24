@@ -1,0 +1,85 @@
+name: Validate template
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.8.6
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: postnord-template-webapp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke-test:
+    name: Docker smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: postnord-template-webapp:ci
+          # Reuses the layers cached by the `build` job above, so this is a
+          # cache hit rather than a second full rebuild.
+          cache-from: type=gha
+      - name: Run container
+        run: docker run -d --name webapp -p 8080:8080 postnord-template-webapp:ci
+      - name: Wait for startup
+        run: sleep 3
+      - name: Health check
+        run: curl -fsS http://localhost:8080/app-dev/health
+
+  notify-portal:
+    name: Notify portal of template update
+    needs: [lint, test, smoke-test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to portal
+        env:
+          PORTAL_DISPATCH_PAT: ${{ secrets.PORTAL_DISPATCH_PAT }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $PORTAL_DISPATCH_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/TIQQE/postnord-tpl-app-portal/dispatches \
+            -d "{\"event_type\":\"template-webapp-updated\",\"client_payload\":{\"sha\":\"${{ github.sha }}\"}}"
